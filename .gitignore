@@ -1,0 +1,16 @@
+# planning is confidential — never commit
+.planning/
+**/.planning/
+# env & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# deps & build
+node_modules/
+dist/
+.wrangler/
+.pio/
+__pycache__/
+.pytest_cache/
