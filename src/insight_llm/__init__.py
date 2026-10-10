@@ -20,7 +20,7 @@ DEFAULT_RATIOS: tuple[float, float, float] = (0.8, 0.1, 0.1)
 SPLIT_NAMES: tuple[str, str, str] = ("train", "valid", "test")
 
 
-def _stable_key(seed: Any, item: Any) -> str:
+def _stable_key(seed: Any, item: Any) -> float:
     """Return a deterministic, uniform-ish hash key for ``item`` under ``seed``.
 
     We hash the item's ``repr`` (so arbitrary hashable/unhashable objects work)
