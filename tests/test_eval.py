@@ -145,6 +145,26 @@ def test_record_baseline_captures_the_axes(baseline_report: ev.Report, baseline:
 # ---------------------------------------------------------------------------
 
 
+def test_a_hallucinated_answer_scores_below_the_bundled_baseline(baseline: ev.Baseline):
+    """The bundled answers must not be the only thing the scorer can praise.
+
+    An answer that INVENTS API (a ``delete_project`` tool, an ``mcp:write``
+    scope) must score strictly below the baseline, so a scoring regression
+    cannot hide behind "the fixture scores 1.0".
+    """
+    hallucinated = dict(ANSWERS)
+    first_case = next(iter(hallucinated))
+    hallucinated[first_case] = {
+        **hallucinated[first_case],
+        "answer": "Use delete_project; it needs the mcp:write scope.",
+        "tools": [
+            {"name": "delete_project", "scope": "mcp:write", "description": "Deletes a project."}
+        ],
+    }
+    report = ev.evaluate(CASES, hallucinated)
+    assert report.score < baseline.score
+    assert report.grounding_score < baseline.grounding_score
+
 def test_perturbing_an_output_lowers_the_score(baseline: ev.Baseline):
     """The headline acceptance test: a degraded output must score lower.
 

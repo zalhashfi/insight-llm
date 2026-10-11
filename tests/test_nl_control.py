@@ -598,6 +598,26 @@ def test_the_ledger_is_bounded_and_its_budget_is_finite():
     assert nl_control._TOKEN_MEMORY_LIMIT > 0
     assert nl_control.EXECUTED_REASON == "already_executed"
 
+def test_a_spent_token_survives_ledger_eviction_while_its_proposal_is_live(sink: SpyDownlink):
+    # The ledger is bounded, so old marks are evicted. A mark whose proposal is
+    # still LIVE must never be evicted: doing so would un-spend the token and
+    # let a second execution of the same proposal reach the seam. Execute once,
+    # flood far past the limit, then re-execute the SAME proposal object — it
+    # must still be `already_executed`.
+    proposal = nl_control.propose("turn the pump on")
+    assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is True
+    assert sink.calls == 1
+
+    # Flood the ledger well past its bounded size, keeping `proposal` alive.
+    for _ in range(nl_control._TOKEN_MEMORY_LIMIT + 128):
+        other = nl_control.propose("turn the pump on")
+        nl_control.execute_proposal(other, sink, other.token)
+
+    replayed = nl_control.execute_proposal(proposal, sink, proposal.token)
+    assert replayed.sent is False, "a live proposal's spent token must survive eviction"
+    assert replayed.reason == nl_control.EXECUTED_REASON
+    assert sink.calls == nl_control._TOKEN_MEMORY_LIMIT + 129  # no extra send
+
 def test_reset_token_memory_is_explicit_and_off_the_execution_path(sink: SpyDownlink):
     # Nothing in the execution path resets the ledger; only a caller can, and it
     # is documented as a test/long-lived-process affordance.

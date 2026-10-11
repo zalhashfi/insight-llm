@@ -918,16 +918,28 @@ def _adopt(proposal: Proposal) -> None:
     """Register ``proposal`` so a record derived from it can be resolved back."""
     _PROPOSAL_TARGETS[id(proposal)] = proposal
 
+def _charged_tokens() -> set[bytes]:
+    """Fingerprints of the tokens of every *live* proposal.
+
+    Used to keep eviction from ever dropping a mark that a still-referenced
+    proposal still needs: un-spending such a token would re-open the
+    double-send the ledger exists to prevent.
+    """
+    marks: set[bytes] = set()
+    for proposal in list(_PROPOSAL_TARGETS.values()):
+        marks.add(_fingerprint(proposal.token))
+    return marks
+
 def _charge(token: str, *aliases: str) -> bool:
     """Atomically claim ``token`` (and any ``aliases``) as spent.
 
     Returns ``True`` the first time and ``False`` on every repeat. The
     check-and-set is a single pass over the fingerprint set, so there is no
     window between "is it spent?" and "mark it spent" in which a second caller
-    could slip through. The ledger is bounded; when full, the oldest entry is
-    dropped, which only ever *loses* a negative (a token could then be spent
-    again), so the executor also refuses an already-*recorded* proposal by
-    identity, and nothing is marked until a send has actually been authorised.
+    could slip through. The ledger is bounded; when full the oldest entries are
+    dropped — but a mark belonging to a *live* proposal is never evicted, so a
+    token that a caller still holds can never be un-spent (a later execution of
+    that same proposal stays ``already_executed``).
     """
     marks = [_fingerprint(token)]
     for alias in aliases:
@@ -937,10 +949,16 @@ def _charge(token: str, *aliases: str) -> bool:
     fresh = all(mark not in _TOKEN_MEMORY for mark in marks)
     for mark in marks:
         _TOKEN_MEMORY.setdefault(mark, None)
-    order = list(_TOKEN_MEMORY)
-    if len(order) > _TOKEN_MEMORY_LIMIT:
-        for mark in order[: len(order) - _TOKEN_MEMORY_LIMIT]:
+    if len(_TOKEN_MEMORY) > _TOKEN_MEMORY_LIMIT:
+        protected = _charged_tokens()
+        excess = len(_TOKEN_MEMORY) - _TOKEN_MEMORY_LIMIT
+        for mark in list(_TOKEN_MEMORY):
+            if excess <= 0:
+                break
+            if mark in protected:
+                continue
             _TOKEN_MEMORY.pop(mark, None)
+            excess -= 1
     return fresh
 
 def _already_spent(token: str, *aliases: str) -> bool:
