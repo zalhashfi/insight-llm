@@ -54,6 +54,26 @@ Because the token is minted per proposal and compared with
 :func:`hmac.compare_digest`, "confirm this" and "confirm *that*" are different
 acts: a user can only ever authorise the exact command they were shown.
 
+## At-most-once is *intrinsic*, not a caller obligation
+
+A proposal executes **at most once per token**, and that guarantee lives *inside
+the module* — the caller does not have to carry a returned record forward to get
+it. The executor keeps a process-wide :data:`_TOKEN_MEMORY`: every token a
+proposal was *minted with* is claimed the first time it is spent
+(:func:`_spend`), and any later call for that token — the *same* proposal object
+handed back a second time, or a re-derived proposal that happens to share the
+token — is refused as ``already_executed`` before the seam is touched. The
+returned :class:`Execution.proposal` still records ``executed=True`` for a UI,
+and re-executing *that* record is refused too (it is mapped back to the proposal
+it came from), but it is now a convenience rather than the thing that makes
+replay safe.
+
+The ledger is bounded and cannot be forged into a false positive: the token is a
+:func:`secrets.token_urlsafe` value minted per call (so it can never equal the
+HMAC-derived fingerprint the executor uses to bind *arbitrary* token strings to
+"spent"), and the memory only ever grows to hold at most
+:data:`_TOKEN_MEMORY_LIMIT` entries before evicting the oldest.
+
 Nothing here reaches the network, imports a provider SDK, or invents a name.
 """
 
@@ -62,6 +82,7 @@ from __future__ import annotations
 import hmac
 import re
 import secrets
+import weakref
 from dataclasses import dataclass, field, replace
 from typing import Final, Protocol, runtime_checkable
 
@@ -80,10 +101,12 @@ __all__ = [
     "OFF_VALUES",
     "CLEAR_WORDS",
     "DEFAULT_DEVICE_KEY",
+    "EXECUTED_REASON",
     "parse_intent",
     "propose",
     "execute_proposal",
     "describe_command",
+    "reset_token_memory",
 ]
 
 
@@ -722,9 +745,16 @@ class Proposal:
 
     ``token`` is a :func:`secrets.token_urlsafe` value, minted per proposal and
     never derived from the prompt. ``confirmed_token`` is the last token the
-    caller offered; it is compared to ``token`` in
-    :func:`execute_proposal` and is kept on the record so a UI can show "this
-    was confirmed" without the executor re-minting anything.
+    caller offered; it is compared to ``token`` in :func:`execute_proposal` and
+    is kept on the record so a UI can show "this was confirmed" without the
+    executor re-minting anything.
+
+    ``executed`` is a *record*, not the safety mechanism: the executor is pure
+    and returns an advanced copy, so this flag can never be set on the proposal
+    the caller still holds. At-most-once is enforced intrinsically by the
+    module's spent-token ledger (see :data:`_TOKEN_MEMORY`), so executing the
+    *same* object twice is refused regardless of this field. It remains useful
+    for a UI that carries the returned :class:`Execution.proposal` forward.
     """
 
     intent: ControlIntent
@@ -803,9 +833,18 @@ def propose(prompt: str, *, table: type = spec) -> Proposal:
             outcome="refused",
             flags=tuple(intent.flags) + tuple(f"hallucination:{name}" for name in invented),
         )
-        return Proposal(intent=refused, command=None, token=token, flags=refused.flags)
+        proposal = Proposal(intent=refused, command=None, token=token, flags=refused.flags)
+        _adopt(proposal)
+        return proposal
 
-    return Proposal(intent=intent, command=intent.to_command(), token=token, flags=intent.flags)
+    proposal = Proposal(intent=intent, command=intent.to_command(), token=token, flags=intent.flags)
+    # Register the minted proposal so a returned/driven record can be resolved
+    # back to it — this is what lets the at-most-once ledger recognise the token
+    # of a proposal that was copied (``confirm``/``replace``) rather than
+    # re-minted. ``propose`` stays pure of the seam; this touches only the
+    # module's own bookkeeping.
+    _adopt(proposal)
+    return proposal
 
 
 def describe_command(command: DownlinkCommand) -> str:
@@ -813,6 +852,49 @@ def describe_command(command: DownlinkCommand) -> str:
     payload = "null (clear)" if command.value is None else command.value
     return f"{command.variable}={payload} -> device {command.device}"
 
+
+# ---------------------------------------------------------------------------
+# The spent-token ledger — at-most-once, held by the module rather than the
+# caller. This is what makes the guarantee intrinsic: the *same* proposal
+# object (or a re-derived proposal sharing its token) is refused on the second
+# attempt even though every :class:`Proposal` is frozen and cannot be marked.
+# ---------------------------------------------------------------------------
+
+#: The machine-readable reason a token that was already spent comes back with.
+#: Kept as a module constant (and exported) so a caller can branch on it without
+#: hard-coding the string, and so a test can assert the exact reason.
+EXECUTED_REASON: Final[str] = "already_executed"
+
+#: Upper bound on the ledger. Every entry is one short digest, so even a busy
+#: process stays tiny; the oldest entry is evicted first when the bound is hit.
+#: A token only needs to be remembered long enough to refuse the second call,
+#: and a stricter policy still refuses *the recorded proposal* by its identity.
+_TOKEN_MEMORY_LIMIT: Final[int] = 4096
+
+#: A secret key fixed for the process, used only to derive the *fingerprint* of
+#: a spent token — never to authorise anything. Storing the fingerprint rather
+#: than the raw token means the small in-memory index holds no usable token, so
+#: the ledger cannot itself be replayed if it were ever observed. It is not an
+#: authorisation secret: a fingerprint cannot authorise a send — the
+#: confirmation compare against the proposal's own token is what does that.
+_TOKEN_MEMORY_KEY: Final[bytes] = secrets.token_bytes(32)
+
+#: Token fingerprint -> ``None`` (a placeholder). The value is deliberately
+#: unused: the token object itself is never stored, and a proposal is resolved
+#: by identity through :data:`_PROPOSAL_TARGETS`, so no strong reference to a
+#: proposal (or its command) is ever pinned by the ledger. The dict is
+#: insertion-ordered, so eviction is simply "drop the oldest".
+_TOKEN_MEMORY: Final[dict[bytes, None]] = {}
+
+#: ``id(proposal) -> proposal`` for the lifetime of each *live* proposal. This
+#: is what lets a returned :class:`Execution.proposal` be scored against the
+#: token of the object it was derived from: the record is a ``dataclasses.replace``
+#: copy, so its ``id`` differs, but we can still resolve it back by identity and
+#: spend the source's token. Without this, threading the returned record forward
+#: (the old contract, and still a documented convenience) would double-send.
+_PROPOSAL_TARGETS: "weakref.WeakValueDictionary[int, Proposal]" = (
+    weakref.WeakValueDictionary()
+)
 
 # ---------------------------------------------------------------------------
 # Execution — the only crossing of the seam, and only on an exact "yes"
@@ -827,6 +909,67 @@ def _digestable(value: str) -> bytes:
     must be a *mismatch*, not a crash).
     """
     return value.encode("utf-8")
+
+def _fingerprint(token: str) -> bytes:
+    """A stable, non-reversible handle for one token string."""
+    return hmac.new(_TOKEN_MEMORY_KEY, _digestable(token), "sha256").digest()
+
+def _adopt(proposal: Proposal) -> None:
+    """Register ``proposal`` so a record derived from it can be resolved back."""
+    _PROPOSAL_TARGETS[id(proposal)] = proposal
+
+def _charge(token: str, *aliases: str) -> bool:
+    """Atomically claim ``token`` (and any ``aliases``) as spent.
+
+    Returns ``True`` the first time and ``False`` on every repeat. The
+    check-and-set is a single pass over the fingerprint set, so there is no
+    window between "is it spent?" and "mark it spent" in which a second caller
+    could slip through. The ledger is bounded; when full, the oldest entry is
+    dropped, which only ever *loses* a negative (a token could then be spent
+    again), so the executor also refuses an already-*recorded* proposal by
+    identity, and nothing is marked until a send has actually been authorised.
+    """
+    marks = [_fingerprint(token)]
+    for alias in aliases:
+        mark = _fingerprint(alias)
+        if mark not in marks:
+            marks.append(mark)
+    fresh = all(mark not in _TOKEN_MEMORY for mark in marks)
+    for mark in marks:
+        _TOKEN_MEMORY.setdefault(mark, None)
+    order = list(_TOKEN_MEMORY)
+    if len(order) > _TOKEN_MEMORY_LIMIT:
+        for mark in order[: len(order) - _TOKEN_MEMORY_LIMIT]:
+            _TOKEN_MEMORY.pop(mark, None)
+    return fresh
+
+def _already_spent(token: str, *aliases: str) -> bool:
+    """Was ``token`` (or any alias) already claimed?"""
+    return any(
+        _fingerprint(candidate) in _TOKEN_MEMORY for candidate in (token, *aliases)
+    )
+
+def _spend(proposal: Proposal) -> bool:
+    """Claim ``proposal``'s token, and the token of the record it came from.
+
+    ``True`` iff this proposal has not been spent before. The *source* token is
+    charged alongside, so executing a returned record refuses the original, and
+    executing the original refuses the record: whichever of the pair goes first,
+    the other is ``already_executed``.
+    """
+    source = _PROPOSAL_TARGETS.get(id(proposal))
+    alias = source.token if source is not None and source is not proposal else None
+    return _charge(proposal.token, *(() if alias is None else (alias,)))
+
+def reset_token_memory() -> None:
+    """Forget every spent token. For tests and long-lived processes only.
+
+    Deliberately explicit: nothing in the execution path calls this, so the
+    at-most-once ledger is never cleared *by* an execution. A caller that resets
+    it is asking for the memory to be dropped; the safe default is to keep it.
+    """
+    _TOKEN_MEMORY.clear()
+    _PROPOSAL_TARGETS.clear()
 
 @dataclass(frozen=True)
 class Execution:
@@ -870,14 +1013,26 @@ def execute_proposal(
        :func:`hmac.compare_digest` against the token minted in :func:`propose`;
        a mismatch (including another proposal's token) is
        ``"confirmation_mismatch"``, and the seam stays untouched.
-    5. **Optional device-key policy** — ``require_device_key=True`` refuses a
+    5. **Not already spent** — the module's own :data:`_TOKEN_MEMORY` is
+       consulted, *intrinsically*: a token that authorised a send once is
+       ``"already_executed"`` forever after, **without the caller threading a
+       returned record**. Re-running ``execute_proposal`` on the very same
+       :class:`Proposal` object therefore refuses the second call rather than
+       sending again.
+    6. **Optional device-key policy** — ``require_device_key=True`` refuses a
        command whose device name is not key-shaped (the wire carries a key, not
        a label), reason ``"device_not_keyed"``. Off by default so the common
        "turn the pump on" case works; a deploy that must not address the default
        key turns it on.
 
-    Only after all five does it call ``downlink.send(command)`` exactly once and
-    return ``Execution(sent=True, reason="ok", ...)``.
+    Only after all six does it call ``downlink.send(command)`` exactly once, mark
+    the token spent (step 5's ledger), and return
+    ``Execution(sent=True, reason="ok", ...)``.
+
+    The token is claimed *after* the confirmation compare so that presenting a
+    wrong guess can never burn the real token, and *before* the send so that two
+    concurrent calls for one token cannot both reach the seam — the claim is the
+    check and the set in a single step (:func:`_charge`).
     """
     if proposal.command is None:
         return Execution(sent=False, reason="not_actionable", proposal=proposal)
@@ -894,10 +1049,25 @@ def execute_proposal(
             proposal=proposal.confirm(str(confirmation)),
         )
 
+    # Intrinsic at-most-once: consult (and, on the send path, claim) the token in
+    # the module's own ledger. This also covers a *re-derived* proposal that was
+    # never marked — the token it was minted with is already spent.
+    spent_source = _PROPOSAL_TARGETS.get(id(proposal))
+    aliases = (
+        (spent_source.token,) if spent_source is not None and spent_source is not proposal else ()
+    )
+    if _already_spent(proposal.token, *aliases):
+        return Execution(sent=False, reason=EXECUTED_REASON, proposal=proposal)
+
     device = proposal.intent.device
     if require_device_key and (device is None or not device.stamped):
         return Execution(sent=False, reason="device_not_keyed", proposal=proposal)
 
+    # Claim the token. ``_spend`` cannot fail here (the check above just passed),
+    # so the send and the record are the only work left — and no second caller
+    # can observe "not spent" anymore.
+    _spend(proposal)
     result = downlink.send(proposal.command)
     done = replace(proposal, executed=True, confirmed_token=confirmation)
+    _adopt(done)  # the returned record resolves back to this token
     return Execution(sent=True, reason="ok", proposal=done, result=result)

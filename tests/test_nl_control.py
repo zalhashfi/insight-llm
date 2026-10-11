@@ -67,6 +67,21 @@ class SpyDownlink:
 def sink() -> SpyDownlink:
     return SpyDownlink()
 
+@pytest.fixture(autouse=True)
+def _clean_token_memory():
+    """Isolate the module's intrinsic at-most-once ledger between tests.
+
+    ``nl_control`` remembers spent tokens *process-wide* so the guarantee does
+    not depend on the caller threading a record. Tests that execute the same
+    token would otherwise leak a "spent" fact into an unrelated test, so the
+    ledger is reset on both sides of every test — a test that wants to prove the
+    ledger persists within one execution still can, because it does not reset in
+    between its own calls.
+    """
+    nl_control.reset_token_memory()
+    yield
+    nl_control.reset_token_memory()
+
 
 #: Prompts that must read as a *command*: one variable, one value, in scope.
 COMMAND_PROMPTS = (
@@ -477,6 +492,154 @@ def test_describe_command_is_human_readable_and_grounded():
     assert "pump" in text and "on" in text and "pompa-1" in text
     assert nl_control.assist.grounding_check(text) == ()
 
+
+# ---------------------------------------------------------------------------
+# (4b) At-most-once is *intrinsic* — the caller need not thread a record
+# ---------------------------------------------------------------------------
+#
+# The headline of this ticket's strengthening: executing the *same* proposal
+# object twice must refuse the second call and touch the sink exactly once,
+# with the caller doing nothing but calling ``execute_proposal`` again. Before
+# this, the executor was pure — it returned an advanced record and left the
+# input untouched — so "at most once" only held for a caller that remembered to
+# carry ``Execution.proposal`` forward. These tests hold it without that.
+
+def test_executing_the_same_proposal_object_twice_refuses_the_second_call(sink: SpyDownlink):
+    proposal = nl_control.propose("turn the pump on")
+
+    first = nl_control.execute_proposal(proposal, sink, proposal.token)
+    second = nl_control.execute_proposal(proposal, sink, proposal.token)  # SAME object
+
+    assert first.sent is True
+    assert second.sent is False, "the second execution of one proposal must be refused"
+    assert second.reason == "already_executed"
+    assert sink.calls == 1, "the downlink sink is called exactly once"
+
+def test_the_refusal_does_not_depend_on_the_returned_record(sink: SpyDownlink):
+    # The caller throws the returned record away and keeps only the proposal it
+    # was handed. That is the whole point: the guarantee is intrinsic.
+    proposal = nl_control.propose("turn the pump on")
+    nl_control.execute_proposal(proposal, sink, proposal.token)
+    again = nl_control.execute_proposal(proposal, sink, proposal.token)
+    assert again.sent is False
+    assert again.reason == nl_control.EXECUTED_REASON
+    assert sink.calls == 1
+
+def test_a_re_derived_proposal_with_the_same_token_is_refused(sink: SpyDownlink):
+    # A UI may rebuild an equivalent proposal (e.g. ``dataclasses.replace``, or a
+    # ``confirm``-stamped copy) that shares the original token. A *fresh object*
+    # cannot dodge the ledger: the token, not the identity, is what is spent.
+    from dataclasses import replace
+
+    proposal = nl_control.propose("turn the pump on")
+    assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is True
+
+    rederived = replace(proposal, executed=False, confirmed_token=None)
+    assert rederived is not proposal
+    assert rederived.token == proposal.token
+    replay = nl_control.execute_proposal(rederived, sink, rederived.token)
+
+    assert replay.sent is False
+    assert replay.reason == "already_executed"
+    assert sink.calls == 1
+
+def test_reusing_a_token_across_proposals_is_refused(sink: SpyDownlink):
+    # Two *different* proposals that share a token: the second must not send.
+    # This is the same token being reused, so neither object identity nor a
+    # returned record can be the thing that saves us.
+    from dataclasses import replace
+
+    first = nl_control.propose("turn the pump on")
+    second = nl_control.propose("turn the fan off")
+    assert first.token != second.token
+
+    # Force the reuse the way a buggy caller might: hand the second proposal the
+    # first proposal's token.
+    second_same_token = replace(second, token=first.token)
+    assert nl_control.execute_proposal(first, sink, first.token).sent is True
+    replay = nl_control.execute_proposal(second_same_token, sink, first.token)
+
+    assert replay.sent is False
+    assert replay.reason == "already_executed"
+    assert sink.calls == 1
+    assert sink.sent[0].variable == "pump", "the refused replay must not have sent"
+
+def test_the_ledger_is_intrinsic_but_the_record_still_agrees(sink: SpyDownlink):
+    # Both the module's ledger *and* the returned record say "done": the ledger
+    # is the safety mechanism, the record is the UI's evidence. Neither alone is
+    # load-bearing enough for the other to be wrong.
+    proposal = nl_control.propose("turn the pump on")
+    first = nl_control.execute_proposal(proposal, sink, proposal.token)
+    assert first.proposal.executed is True
+    # Executing the returned record is also refused...
+    assert nl_control.execute_proposal(
+        first.proposal, sink, proposal.token
+    ).reason == "already_executed"
+    # ...and so is the original, independently of that record.
+    assert nl_control.execute_proposal(
+        proposal, sink, proposal.token
+    ).reason == "already_executed"
+    assert sink.calls == 1
+
+def test_a_wrong_guess_does_not_burn_the_token(sink: SpyDownlink):
+    # The confirmation compare runs before the ledger claim, so a wrong guess
+    # must not consume the one legitimate execution.
+    proposal = nl_control.propose("turn the pump on")
+    wrong = nl_control.execute_proposal(proposal, sink, "not-the-token")
+    assert wrong.sent is False and wrong.reason == "confirmation_mismatch"
+
+    right = nl_control.execute_proposal(proposal, sink, proposal.token)
+    assert right.sent is True, "a rejected guess must not spend the real token"
+    assert sink.calls == 1
+
+def test_the_ledger_is_bounded_and_its_budget_is_finite():
+    # The memory is capped, so it cannot grow without limit in a long-running
+    # process; the bound is what makes "remember every spent token" safe.
+    assert nl_control._TOKEN_MEMORY_LIMIT > 0
+    assert nl_control.EXECUTED_REASON == "already_executed"
+
+def test_reset_token_memory_is_explicit_and_off_the_execution_path(sink: SpyDownlink):
+    # Nothing in the execution path resets the ledger; only a caller can, and it
+    # is documented as a test/long-lived-process affordance.
+    proposal = nl_control.propose("turn the pump on")
+    assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is True
+    assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is False
+
+    nl_control.reset_token_memory()
+    # After an explicit reset the token is considered fresh again — the reset is
+    # the caller opting out of the memory, not an execution clearing it.
+    assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is True
+    assert sink.calls == 2
+
+def test_ambiguous_nl_still_only_asks_and_never_executes(sink: SpyDownlink):
+    # Acceptance, verbatim: ambiguous NL asks for confirmation (a question) and
+    # executes nothing — even when its own token is offered.
+    for prompt in AMBIGUOUS_PROMPTS:
+        proposal = nl_control.propose(prompt)
+        assert proposal.command is None
+        assert proposal.needs_confirmation is False
+        assert proposal.text.endswith("?"), prompt
+
+        result = nl_control.execute_proposal(proposal, sink, proposal.token)
+        assert result.sent is False
+        assert result.reason == "not_actionable"
+    assert sink.calls == 0, "no ambiguous prompt may reach the sink"
+
+def test_clear_nl_still_requires_confirmation_and_the_ledger_never_refuses_a_first_run(sink: SpyDownlink):
+    # Acceptance, verbatim: clear NL proposes but still requires confirmation;
+    # and the intrinsic ledger must not refuse a *first* execution of a fresh,
+    # never-spent token (the at-most-once memory stays a negative-only guard).
+    for prompt, _, _ in COMMAND_PROMPTS:
+        proposal = nl_control.propose(prompt)
+        assert proposal.needs_confirmation is True
+        assert nl_control.execute_proposal(proposal, sink).sent is False
+        # The first confirmed call for a fresh token is admitted...
+        assert nl_control.execute_proposal(proposal, sink, proposal.token).sent is True
+        # ...and only the *second* is refused.
+        assert nl_control.execute_proposal(
+            proposal, sink, proposal.token
+        ).reason == "already_executed"
+    assert sink.calls == len(COMMAND_PROMPTS)
 
 # ---------------------------------------------------------------------------
 # (5) Purity, determinism and the repo's offline convention
