@@ -1,0 +1,87 @@
+[
+  {
+    "id": "tools_read_catalogue",
+    "prompt": "List the read tools the insight MCP bridge exposes, with the scope each requires.",
+    "facts": [
+      { "kind": "tool", "key": "list_projects", "value": "mcp:read" },
+      { "kind": "tool", "key": "get_state", "value": "mcp:read" },
+      { "kind": "tool", "key": "get_series", "value": "mcp:read" },
+      { "kind": "tool", "key": "list_integrations", "value": "mcp:read" },
+      { "kind": "tool", "key": "get_integration", "value": "mcp:read" }
+    ]
+  },
+  {
+    "id": "tools_write_catalogue",
+    "prompt": "List the write tools the insight MCP bridge exposes, with the scope each requires.",
+    "facts": [
+      { "kind": "tool", "key": "create_project", "value": "mcp:manage" },
+      { "kind": "tool", "key": "set_variable", "value": "mcp:manage" },
+      { "kind": "tool", "key": "create_layout", "value": "mcp:manage" },
+      { "kind": "tool", "key": "create_automation", "value": "mcp:manage" },
+      { "kind": "tool", "key": "emit_event", "value": "mcp:manage" }
+    ]
+  },
+  {
+    "id": "tools_absent_verbs",
+    "prompt": "Does the insight MCP bridge let a client delete a project or a variable? Name the tool if so.",
+    "facts": [
+      { "kind": "tool", "key": "delete_project", "expect_absent": true },
+      { "kind": "tool", "key": "delete_variable", "expect_absent": true },
+      { "kind": "tool", "key": "mcp:write", "expect_absent": true }
+    ]
+  },
+  {
+    "id": "routes_read_and_ingest",
+    "prompt": "Which HTTP routes does insight expose for health, telemetry ingest and read?",
+    "facts": [
+      { "kind": "route", "key": "/healthz", "value": "GET" },
+      { "kind": "route", "key": "/v1/version", "value": "GET" },
+      { "kind": "route", "key": "/v1/telemetry", "value": "POST" },
+      { "kind": "route", "key": "/v1/projects/:proj/state", "value": "GET" },
+      { "kind": "route", "key": "/v1/projects/:proj/variables/:key/series", "value": "GET" },
+      { "kind": "route", "key": "/v1/telemetry/:proj", "value": "POST", "expect_absent": true }
+    ]
+  },
+  {
+    "id": "routes_control_and_admin",
+    "prompt": "Which routes carry downlink control, OTA and admin project mutation?",
+    "facts": [
+      { "kind": "route", "key": "/v1/control", "value": "GET" },
+      { "kind": "route", "key": "/v1/control/ack", "value": "POST" },
+      { "kind": "route", "key": "/v1/ota", "value": "GET" },
+      { "kind": "route", "key": "/v1/ota/image", "value": "GET" },
+      { "kind": "route", "key": "/v1/admin/projects/:proj", "value": "DELETE" },
+      { "kind": "route", "key": "/v1/admin/projects/:proj/firmware", "value": "POST" }
+    ]
+  },
+  {
+    "id": "routes_mcp_and_integrations",
+    "prompt": "Which routes does the MCP bridge and the integrations surface sit behind?",
+    "facts": [
+      { "kind": "route", "key": "/v1/mcp/read", "value": "GET" },
+      { "kind": "route", "key": "/v1/mcp/write", "value": "POST" },
+      { "kind": "route", "key": "/v1/integrations", "value": "GET" },
+      { "kind": "route", "key": "/v1/integrations/test", "value": "POST" },
+      { "kind": "route", "key": "/v1/mcp/delete", "value": "POST", "expect_absent": true }
+    ]
+  },
+  {
+    "id": "limits_series_and_firmware",
+    "prompt": "What are the numeric caps on a series window and on a firmware upload?",
+    "facts": [
+      { "kind": "limit", "key": "series_max_window_ms", "value": 2592000000 },
+      { "kind": "limit", "key": "series_default_window_ms", "value": 3600000 },
+      { "kind": "limit", "key": "firmware_max_bytes", "value": 8388608 }
+    ]
+  },
+  {
+    "id": "identity_roles_and_permissions",
+    "prompt": "What roles and permission thresholds does insight enforce on a project?",
+    "facts": [
+      { "kind": "limit", "key": "role:owner_rank", "value": 3 },
+      { "kind": "limit", "key": "role:admin_rank", "value": 2 },
+      { "kind": "limit", "key": "permission:project:delete", "value": 3 },
+      { "kind": "limit", "key": "permission:member:invite", "value": 2 }
+    ]
+  }
+]

@@ -2,6 +2,10 @@
 
 This module exposes :func:`make_split`, a pure function that deterministically
 partitions a sequence of items into train/valid/test partitions.
+
+The eval harness lives alongside it: :mod:`insight_llm.eval` scores an answer
+for grounding against the local ``insight`` API table in
+:mod:`insight_llm.spec`, and :mod:`insight_llm.report` renders the run.
 """
 
 from __future__ import annotations

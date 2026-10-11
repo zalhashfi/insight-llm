@@ -1,0 +1,125 @@
+[
+  {
+    "prompt_id": "tools_read_catalogue",
+    "answer": "The MCP bridge exposes eleven read tools, all requiring the mcp:read scope.",
+    "tools": [
+      {
+        "name": "list_projects",
+        "scope": "mcp:read",
+        "description": "List the projects visible to the caller."
+      },
+      {
+        "name": "get_state",
+        "scope": "mcp:read",
+        "description": "Read the current projection (latest per stream)."
+      },
+      {
+        "name": "get_series",
+        "scope": "mcp:read",
+        "description": "Read a variable's series over a window."
+      },
+      {
+        "name": "list_integrations",
+        "scope": "mcp:read",
+        "description": "List a project's integrations, secrets redacted."
+      },
+      {
+        "name": "get_integration",
+        "scope": "mcp:read",
+        "description": "Read one integration by id, secrets redacted."
+      }
+    ],
+    "notes": "Read tools sit behind GET /v1/mcp/read; mcp:read projects to the 'read' capability."
+  },
+  {
+    "prompt_id": "tools_write_catalogue",
+    "answer": "The MCP bridge exposes twelve write tools, all requiring the mcp:manage scope.",
+    "tools": [
+      {
+        "name": "create_project",
+        "scope": "mcp:manage",
+        "description": "Create a project owned by the caller."
+      },
+      {
+        "name": "set_variable",
+        "scope": "mcp:manage",
+        "description": "Set or clear a project variable's value."
+      },
+      {
+        "name": "create_layout",
+        "scope": "mcp:manage",
+        "description": "Create a dashboard layout."
+      },
+      {
+        "name": "create_automation",
+        "scope": "mcp:manage",
+        "description": "Create an automation rule."
+      },
+      {
+        "name": "emit_event",
+        "scope": "mcp:manage",
+        "description": "Emit a discrete event that can fire automations."
+      }
+    ],
+    "notes": "POST /v1/mcp/write additionally requires the mcp_write_enabled flag."
+  },
+  {
+    "prompt_id": "tools_absent_verbs",
+    "answer": "No. There is deliberately no delete tool on the MCP surface, and no mcp:write scope.",
+    "tools": [],
+    "notes": "Deleting a project stays a human, owner-only admin action (DELETE /v1/admin/projects/:proj)."
+  },
+  {
+    "prompt_id": "routes_read_and_ingest",
+    "answer": "Health and version are unauthenticated; telemetry is ingested at POST /v1/telemetry and read per project.",
+    "tools": [],
+    "route": "/v1/telemetry",
+    "notes": "GET /v1/projects/:proj/state and GET /v1/projects/:proj/variables/:key/series carry the reads; the retired /v1/telemetry/:proj form does not exist.",
+    "routes": [
+      "/healthz",
+      "/v1/version",
+      "/v1/telemetry",
+      "/v1/projects/:proj/state",
+      "/v1/projects/:proj/variables/:key/series"
+    ]
+  },
+  {
+    "prompt_id": "routes_control_and_admin",
+    "answer": "Downlink is GET /v1/control plus POST /v1/control/ack; OTA is GET /v1/ota and GET /v1/ota/image; admin mutations are DELETE /v1/admin/projects/:proj and POST /v1/admin/projects/:proj/firmware.",
+    "tools": [],
+    "notes": "The control socket is GET /v1/control/ws.",
+    "routes": [
+      "/v1/control",
+      "/v1/control/ack",
+      "/v1/ota",
+      "/v1/ota/image",
+      "/v1/admin/projects/:proj",
+      "/v1/admin/projects/:proj/firmware"
+    ]
+  },
+  {
+    "prompt_id": "routes_mcp_and_integrations",
+    "answer": "The MCP gate serves GET /v1/mcp/read and POST /v1/mcp/write; integrations expose GET /v1/integrations and POST /v1/integrations/test.",
+    "tools": [],
+    "route": "/v1/mcp/read",
+    "notes": "There is no /v1/mcp/delete route; the bridge's verbs are tools, served through the two gate paths above.",
+    "routes": [
+      "/v1/mcp/read",
+      "/v1/mcp/write",
+      "/v1/integrations",
+      "/v1/integrations/test"
+    ]
+  },
+  {
+    "prompt_id": "limits_series_and_firmware",
+    "answer": "A series window defaults to 3600000 ms and is capped at 2592000000 ms; a firmware upload is capped at 8388608 bytes.",
+    "tools": [],
+    "notes": "The 8 MiB cap is MAX_FIRMWARE_BYTES in domains/firmware/upload.ts."
+  },
+  {
+    "prompt_id": "identity_roles_and_permissions",
+    "answer": "Roles rank member < admin < owner (1/2/3); project:delete requires owner and member:invite requires admin.",
+    "tools": [],
+    "notes": "Permissions are a minimum-role table consulted by can(role, action)."
+  }
+]
